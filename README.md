@@ -1,4 +1,4 @@
-# RSEconometrics
+# RSEconometrics.jl
 Functions for econometric analysis in Julia.
 
 This is a package containing econometrics-related functions that I use across projects.
