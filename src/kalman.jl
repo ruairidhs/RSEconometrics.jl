@@ -94,6 +94,19 @@ KalmanPredictionIterator(ys, SSM::StateSpaceModel;
                          P1 = reshape((I - kron(SSM.F, SSM.F)) \ vec(SSM.Q), SSM.r, SSM.r)
                         ) = KalmanPredictionIterator(SSM, ξ1, P1, ys, xs)
 
+function KalmanPredictionIterator(ys, SSM::StateSpaceModel{SF, SA, SH, SQ, SR}) where {
+    R, N, T, X, Y, Z,
+    SF <: SMatrix{R, R, X, Y}, SA <: SMatrix{N, 1, T, Z},
+    SH <: SMatrix, SQ <: SMatrix, SR <: SMatrix
+   }
+    xs = Base.Iterators.repeated(one(T))
+    ξ1 = zeros(SMatrix{R, 1})
+    P1 = reshape((I - kron(SSM.F, SSM.F)) \ vec(SSM.Q), Size(R, R))
+    return KalmanPredictionIterator(SSM, ξ1, P1, ys, xs)
+end
+
+    
+
 # Iteration interface: inherit size from ys
 #Base.IteratorSize(::Type{KalmanPredictionIterator{M, Td}}) where {M, Td} = 
 #    Base.IteratorSize(Td)

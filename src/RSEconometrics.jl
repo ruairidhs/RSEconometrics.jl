@@ -4,7 +4,12 @@ using LinearAlgebra,
       SparseArrays,
       Distributions,
       StaticArrays,
-      ForwardDiff
+      ForwardDiff,
+      DiffRules,
+      Optimization,
+      OptimizationOptimJL
+
+import Polynomials
 
 include("kalman.jl")
 include("arma.jl")
@@ -18,6 +23,11 @@ export StateSpaceModel,             # Kalman filter
        construct_ar,
        arma_nll,
        get_constant,
+       is_stationary,
+       is_invertible,
+       common_factors,
+       estimate_arma,
+       varcov_arma,
        ml_varcov,                   # Maximum likelihood
        get_std_errs
 

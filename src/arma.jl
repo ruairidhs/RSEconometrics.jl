@@ -1,3 +1,8 @@
+# ====== Description =====
+# Defines an ARMA type and related functions:
+#   - Checks for stationarity, invertibility, common factors
+#   - Simulation
+#   - Maximum likelihood estimation via the Kalman Filter
 """
 UnivariateARMA(Φ::AbstractVector, Θ::AbstractVector, μ::Number, d::Distribution)
 
@@ -44,11 +49,45 @@ Compute `c` satisfying:
 get_constant(arma::UnivariateARMA) = (1 - sum(arma.Φ)) * arma.μ
 
 """
+    is_stationary(arma::UnivariateARMA)
+
+True if all of the roots of the AR polynomial are outside the unit circle.
+"""
+function is_stationary(arma)
+    pn = Polynomials.Polynomial([1; -arma.Φ])
+    return all(abs.(Polynomials.roots(pn)) .> 1)
+end
+DiffRules.@define_diffrule RSEconometrics.is_stationary(arma) = :(0)
+
+"""
+    is_invertible(arma::UnivariateARMA)
+
+True if all of the roots of the MA polynomial are outside the unit circle.
+"""
+function is_invertible(arma::UnivariateARMA)
+    pn = Polynomials.Polynomial([1; arma.Θ])
+    return all(abs.(Polynomials.roots(pn)) .> 1)
+end
+
+"""
+    common_factors(arma::UnivariateARMA)
+
+True if the intersection of the AR and MA roots is not empty.
+"""
+function common_factors(arma::UnivariateARMA; tol=1e-6)
+    ar_roots = Polynomials.roots(Polynomials.Polynomial([1; -arma.Φ]))
+    ma_roots = Polynomials.roots(Polynomials.Polynomial([1; arma.Θ]))
+    return mapreduce(t -> abs(t[1] - t[2]) < tol, |, Iterators.product(ar_roots, ma_roots))
+end
+
+"""
     StateSpaceModel(arma::UnivariateARMA)
 
 Construct the state-space representation of `arma`.
 """
-function StateSpaceModel(arma::UnivariateARMA)
+function StateSpaceModel(arma::UnivariateARMA{VΦ, VΘ, T, D}) where {VΦ <: AbstractArray,
+                                                                    VΘ <: AbstractArray,
+                                                                    T, D}
     # Some set up
     (; Φ, Θ, μ, d) = arma
     σ2 = var(d)
@@ -132,4 +171,112 @@ function Base.rand(arma::UnivariateARMA, T::Int; burn_in::Int=0)
     end
 
     return ys .+ arma.μ
+end
+
+# ===== Methods for the efficient construction of StaticArrays ARMA models =====
+@generated function _make_F(arma)
+    p = arma.parameters[1].parameters[4]
+    q = arma.parameters[2].parameters[4]
+    r = max(p, q+1)
+
+    quote
+        extended_Φ = hcat(permutedims(arma.Φ),
+                          zeros(SMatrix{1, $(r-p)})
+                         )
+        diagm(Val(-1) => ones(SVector{$(r-1)})) + 
+            vcat(extended_Φ, zeros(SMatrix{$(r-1), $r}))
+    end
+end
+
+@generated function _make_Ht(arma)
+    p = arma.parameters[1].parameters[4]
+    q = arma.parameters[2].parameters[4]
+    r = max(p, q+1)
+
+    quote
+        permutedims(vcat(SVector{1}(1), arma.Θ, zeros(SVector{$(r-q-1)})))
+    end
+end
+
+@generated function _make_Q(arma)
+    p = arma.parameters[1].parameters[4]
+    q = arma.parameters[2].parameters[4]
+    r = max(p, q+1)
+
+    quote
+        reshape(vcat(var(arma.d), zeros(SVector{$(r*r-1)})), Size($r, $r))
+    end
+end
+
+function StateSpaceModel(arma::UnivariateARMA{VΦ, VΘ, T, D}) where {VΦ <: StaticArray,
+                                                                    VΘ <: StaticArray,
+                                                                    T, D}
+    return StateSpaceModel(_make_F(arma),
+                           arma.μ * SMatrix{1,1}(1),
+                           _make_Ht(arma),
+                           _make_Q(arma),
+                           SMatrix{1,1}(zero(eltype(VΦ)))
+                          )
+end
+
+# ===== Maximum likelihood estimation =====
+function _static_arma_likelihood(Φ::SVector, Θ::SVector, μ, σ, ys;
+        check_stationary=true, observation_likelihood=false
+    )
+    arma = UnivariateARMA(Φ, Θ, μ, Normal(0, sqrt(σ^2)))
+    if check_stationary && !is_stationary(arma)
+        return Inf
+    end
+    ssm = StateSpaceModel(arma)
+    iter = KalmanPredictionIterator(ys, ssm)
+    if observation_likelihood
+        return map(t -> t.ll, iter)
+    else
+        return kalman_log_likelihood(iter)
+    end
+end
+
+@generated function _split_arma_args(u, p, q)
+    P, Q = p.parameters[1], q.parameters[1]
+    Φ_indices = SVector{P}(1:P)
+    Θ_indices = SVector{Q}((P+1):(P+Q))
+    μ_index, σ_index = P + Q + 1, P + Q + 2
+    quote
+        (u[$Φ_indices], u[$Θ_indices], u[$μ_index], u[$σ_index])
+    end
+end
+
+function _make_syms(p, q)
+    ars = Symbol.("AR_" .* string(1:p))
+    mas = Symbol.("MA_" .* string(1:q))
+    return [ars; mas; :mu; :sigma]
+end
+
+function estimate_arma(ys, p, q; 
+        init=[zeros(p); zeros(q); 0; 1],
+        check_stationary=true,
+        method=BFGS()
+    )
+    function obj(u, _)
+        -_static_arma_likelihood(_split_arma_args(u, Val(p), Val(q))...,
+                                 ys; check_stationary=check_stationary
+                                )
+    end
+
+    prob = OptimizationProblem(OptimizationFunction(obj,
+                                                    Optimization.AutoForwardDiff();
+                                                    syms = _make_syms(p, q)
+                                                   ),
+                               init
+                              )
+    return solve(prob, method)
+end
+
+function varcov_arma(sol, ys, p, q; method=:sandwich)
+    observation_likelihood = method != :hessian
+    nll = (u, _) -> -_static_arma_likelihood(_split_arma_args(u, Val(p), Val(q))..., ys;
+                                             check_stationary=false,
+                                             observation_likelihood=observation_likelihood
+                                            )
+    return ml_varcov(nll, sol, (), method)
 end
